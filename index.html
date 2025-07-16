@@ -523,30 +523,34 @@
                             let habitat = 'Not specified';
                             let locations = ['Not specified'];
 
-                            // --- NEW: Animal type validation ---
+                            // --- NEW: Stricter Animal type validation ---
                             const lowerCaseDescription = description.toLowerCase();
+                            const pageTitle = decodeURIComponent(queryTitle).toLowerCase(); // Get the actual page title
                             const firstSentence = lowerCaseDescription.split('.')[0];
 
-                            const animalIndicators = [
+                            const strongAnimalIndicators = [
                                 'species of', 'genus of', 'family of', 'order of', 'class of', 'phylum of', 'kingdom animalia',
-                                'animal is', 'mammal is', 'bird is', 'fish is', 'reptile is', 'amphibian is', 'insect is',
+                                'animal is a', 'mammal is a', 'bird is a', 'fish is a', 'reptile is a', 'amphibian is a', 'insect is a',
                                 'vertebrate', 'invertebrate', 'wildlife', 'fauna', 'creature'
                             ];
                             
                             // Check for strong biological indicators in the first sentence or overall description
-                            const isLikelyAnimalByContent = animalIndicators.some(indicator => firstSentence.includes(indicator)) ||
-                                                            animalIndicators.some(indicator => lowerCaseDescription.includes(indicator));
+                            const isStronglyAnimalByContent = strongAnimalIndicators.some(indicator => firstSentence.includes(indicator)) ||
+                                                              strongAnimalIndicators.some(indicator => lowerCaseDescription.includes(indicator));
 
-                            // Also check if the original animal name (or parts of it) are present in the description
+                            // Also check if the original animal name (or parts of it) are prominently in the description or title
                             const originalNameKeywords = animalName.toLowerCase().split(' ').filter(k => k.length > 0);
                             const originalNameInDescription = originalNameKeywords.every(keyword => lowerCaseDescription.includes(keyword));
+                            const originalNameInTitle = originalNameKeywords.every(keyword => pageTitle.includes(keyword));
 
-                            // If it doesn't seem like an animal, return null
-                            if (!isLikelyAnimalByContent && !originalNameInDescription) {
-                                console.log(`Wikipedia page for "${animalName}" (via "${decodeURIComponent(queryTitle)}") does not appear to be about an animal based on content. Skipping.`);
+
+                            // Combine validation: Must be strongly animal-related by content OR the original name must be in the title
+                            // This prevents generic terms like "bus" from being classified as an animal
+                            if (!isStronglyAnimalByContent && !originalNameInTitle) {
+                                console.log(`Wikipedia page for "${animalName}" (via "${decodeURIComponent(queryTitle)}") does not appear to be about an animal based on content or title. Skipping.`);
                                 continue; // Skip this page and try the next search term
                             }
-                            // --- END NEW: Animal type validation ---
+                            // --- END NEW: Stricter Animal type validation ---
 
 
                             // Attempt to extract scientific name from the first sentence of the extract
@@ -579,7 +583,7 @@
                                     lifespan = lifespanMatch[1];
                                 } else {
                                     lifespanMatch = lowerCaseDescription.match(/(\d+\s*(?:to\s*\d+\s*)?(?:years|year|months|month|days|day) old)/i); // e.g., "10 years old"
-                                    if (lifespanMatch && lifespanMatch[1]) lifespan = lifespanMatch[1];
+                                    if (lifespanMatch && lifespanMatch[1]) lifespan = lifespan[1];
                                 }
                             }
 
