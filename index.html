@@ -325,16 +325,20 @@
                             if (filteredResults.length > 0) {
                                 const bestMatchTitle = encodeURIComponent(filteredResults[0].title);
                                 const infoUrl = `${commonsApiUrl}&prop=imageinfo&iiprop=url&titles=${bestMatchTitle}&redirects=1`;
-                                const infoResponse = await fetch(infoUrl);
-                                const infoData = await infoResponse.json();
-                                const infoPages = infoData.query?.pages;
-                                if (infoPages) {
-                                    const infoPageId = Object.keys(infoPages)[0];
-                                    const infoPage = infoPages[infoPageId];
-                                    if (infoPage.imageinfo && infoPage.imageinfo[0]?.url) {
-                                        imageUrl = infoPage.imageinfo[0].url;
-                                        console.log(`Found single image on Wikimedia Commons for ${animalName}: ${imageUrl}`);
+                                try { // Added try-catch for infoResponse
+                                    const infoResponse = await fetch(infoUrl);
+                                    const infoData = await infoResponse.json();
+                                    const infoPages = infoData.query?.pages;
+                                    if (infoPages) {
+                                        const infoPageId = Object.keys(infoPages)[0];
+                                        const infoPage = infoPages[infoPageId];
+                                        if (infoPage.imageinfo && infoPage.imageinfo[0]?.url) {
+                                            imageUrl = infoPage.imageinfo[0].url;
+                                            console.log(`Found single image on Wikimedia Commons for ${animalName}: ${imageUrl}`);
+                                        }
                                     }
+                                } catch (error) {
+                                    console.error('Error fetching image info from Wikimedia Commons:', error);
                                 }
                             }
                         }
@@ -397,7 +401,7 @@
 
                 if (imageTitlesToFetch) {
                     const infoUrl = `${commonsApiUrl}&prop=imageinfo&iiprop=url&titles=${imageTitlesToFetch}&redirects=1`;
-                    try {
+                    try { // Added try-catch for infoResponse
                         const infoResponse = await fetch(infoUrl);
                         if (!infoResponse.ok) { console.warn(`Wikimedia Commons imageinfo failed: ${infoResponse.status}`); return []; }
                         const infoData = await infoResponse.json();
@@ -523,34 +527,58 @@
                             let habitat = 'Not specified';
                             let locations = ['Not specified'];
 
-                            // --- NEW: Stricter Animal type validation ---
+                            // --- NEW: Ultra-Stricter Animal type validation ---
                             const lowerCaseDescription = description.toLowerCase();
                             const pageTitle = decodeURIComponent(queryTitle).toLowerCase(); // Get the actual page title
                             const firstSentence = lowerCaseDescription.split('.')[0];
 
                             const strongAnimalIndicators = [
-                                'species of', 'genus of', 'family of', 'order of', 'class of', 'phylum of', 'kingdom animalia',
-                                'animal is a', 'mammal is a', 'bird is a', 'fish is a', 'reptile is a', 'amphibian is a', 'insect is a',
+                                'is a species of', 'is a genus of', 'is a family of', 'is an order of', 'is a class of', 'is a phylum of', 'kingdom animalia',
+                                'is an animal', 'is a mammal', 'is a bird', 'is a fish', 'is a reptile', 'is an amphibian', 'is an insect',
                                 'vertebrate', 'invertebrate', 'wildlife', 'fauna', 'creature'
                             ];
                             
-                            // Check for strong biological indicators in the first sentence or overall description
-                            const isStronglyAnimalByContent = strongAnimalIndicators.some(indicator => firstSentence.includes(indicator)) ||
-                                                              strongAnimalIndicators.some(indicator => lowerCaseDescription.includes(indicator));
+                            // Keywords that indicate it's NOT an animal (expanded list)
+                            const nonAnimalKeywords = [
+                                'disambiguation', 'may refer to', 'list of', 'human', 'person', 'organization', 'company', 'building', 
+                                'vehicle', 'plant', 'fungus', 'bacteria', 'virus', 'disease', 'concept', 'event', 'geographic',
+                                'software', 'music', 'film', 'book', 'art', 'history', 'mathematics', 'physics', 'chemistry',
+                                'engineering', 'technology', 'tool', 'weapon', 'food', 'drink', 'sport', 'game', 'toy', 'clothing',
+                                'material', 'chemical', 'element', 'compound', 'structure', 'geology', 'astronomy', 'celestial body',
+                                'mythology', 'fictional', 'character', 'album', 'song', 'television series', 'band', 'group',
+                                'school', 'bus', 'pencil', 'object', 'abstract', 'theory', 'system' // Added more specific non-animal terms
+                            ];
 
+                            // Check if any non-animal keywords are prominently present in title or first sentence
+                            const containsNonAnimalKeywords = nonAnimalKeywords.some(keyword => 
+                                pageTitle.includes(keyword) || firstSentence.includes(keyword)
+                            );
+
+                            // If it contains non-animal keywords, it's likely not an animal
+                            if (containsNonAnimalKeywords) {
+                                console.log(`Wikipedia page for "${animalName}" (via "${decodeURIComponent(queryTitle)}") contains non-animal keywords. Skipping.`);
+                                continue; // Skip this page and try the next search term
+                            }
+
+                            // Check for strong biological indicators in the first sentence
+                            const isStronglyAnimalByFirstSentence = strongAnimalIndicators.some(indicator => firstSentence.includes(indicator));
+                            
                             // Also check if the original animal name (or parts of it) are prominently in the description or title
                             const originalNameKeywords = animalName.toLowerCase().split(' ').filter(k => k.length > 0);
                             const originalNameInDescription = originalNameKeywords.every(keyword => lowerCaseDescription.includes(keyword));
                             const originalNameInTitle = originalNameKeywords.every(keyword => pageTitle.includes(keyword));
 
+                            // Final, very strict validation:
+                            // 1. Must be strongly animal-related by content in the FIRST sentence, OR
+                            // 2. The original name must be very prominent in BOTH the title AND description, AND the description must be substantial.
+                            const isDefinitelyAnimal = isStronglyAnimalByFirstSentence || 
+                                                       (originalNameInTitle && originalNameInDescription && lowerCaseDescription.length > 100); // Increased length check
 
-                            // Combine validation: Must be strongly animal-related by content OR the original name must be in the title
-                            // This prevents generic terms like "bus" from being classified as an animal
-                            if (!isStronglyAnimalByContent && !originalNameInTitle) {
-                                console.log(`Wikipedia page for "${animalName}" (via "${decodeURIComponent(queryTitle)}") does not appear to be about an animal based on content or title. Skipping.`);
+                            if (!isDefinitelyAnimal) {
+                                console.log(`Wikipedia page for "${animalName}" (via "${decodeURIComponent(queryTitle)}") does not meet ultra-strict animal criteria. Skipping.`);
                                 continue; // Skip this page and try the next search term
                             }
-                            // --- END NEW: Stricter Animal type validation ---
+                            // --- END NEW: Ultra-Stricter Animal type validation ---
 
 
                             // Attempt to extract scientific name from the first sentence of the extract
