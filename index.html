@@ -220,40 +220,87 @@
                     .map(photo => photo.src.large);
             } catch (error) { console.error('Error fetching from Pexels:', error); return null; }
         }
+
+        /**
+         * Generates a list of potential Wikipedia search terms for a given animal name,
+         * prioritizing exact matches, then common suffixes/removals, then disambiguation.
+         * @param {string} animalName The original animal name.
+         * @returns {string[]} An array of encoded search terms.
+         */
+        function getWikipediaSearchTerms(animalName) {
+            const terms = new Set();
+            const lowerCaseName = animalName.toLowerCase();
+
+            // 1. Exact match
+            terms.add(animalName);
+
+            // 2. Add common animal type suffixes
+            const commonSuffixes = [' fish', ' bird', ' snake', ' mammal', ' reptile', ' amphibian', ' insect', ' animal'];
+            for (const suffix of commonSuffixes) {
+                if (!lowerCaseName.endsWith(suffix)) { // Avoid "fish fish"
+                    terms.add(animalName + suffix);
+                }
+            }
+
+            // 3. Remove common animal type suffixes if present
+            for (const suffix of commonSuffixes) {
+                if (lowerCaseName.endsWith(suffix.trim())) { // Check for " fish" -> "fish"
+                    const strippedName = animalName.substring(0, animalName.length - suffix.length).trim();
+                    if (strippedName) terms.add(strippedName);
+                }
+            }
+
+            // 4. Add common disambiguation (e.g., "Barramundi (fish)")
+            if (!lowerCaseName.includes('(')) { // Avoid adding disambiguation to already disambiguated terms
+                for (const suffix of commonSuffixes) {
+                    const cleanSuffix = suffix.trim();
+                    if (cleanSuffix) {
+                        terms.add(`${animalName} (${cleanSuffix})`);
+                        // Also try stripped name with disambiguation if original has suffix
+                        if (lowerCaseName.endsWith(suffix.trim())) {
+                            const strippedName = animalName.substring(0, animalName.length - cleanSuffix.length).trim(); // Corrected to use cleanSuffix
+                            if (strippedName) terms.add(`${strippedName} (${cleanSuffix})`);
+                        }
+                    }
+                }
+            }
+            
+            // Convert to array and encode
+            return Array.from(terms).map(term => encodeURIComponent(term));
+        }
         
         /** Fetches images from Wikipedia. Can return one or many. */
         async function fetchWikipediaImages(animalName, count, findOne) {
-            const queryTitle = encodeURIComponent(animalName);
+            const searchTerms = getWikipediaSearchTerms(animalName);
             let imageUrls = [];
 
             if (findOne) {
                 // For a single image (thumbnail) using pageimages property from Wikipedia
                 let imageUrl = null;
-                const wikiPageUrl = `${wikipediaApiUrl}&prop=pageimages&pithumbsize=400&titles=${queryTitle}&redirects=1`;
-                try {
-                    const response = await fetch(wikiPageUrl);
-                    if (!response.ok) { console.warn(`Wikipedia API (single image) failed: ${response.status}`); }
-                    const data = await response.json();
-                    const pages = data.query?.pages;
-                    if (pages) {
-                        const pageId = Object.keys(pages)[0];
-                        const page = pages[pageId];
-                        if (!page.missing && page.thumbnail?.source) {
+                for (const queryTitle of searchTerms) {
+                    const wikiPageUrl = `${wikipediaApiUrl}&prop=pageimages&pithumbsize=400&titles=${queryTitle}&redirects=1`;
+                    try {
+                        const response = await fetch(wikiPageUrl);
+                        const data = await response.json();
+                        const pages = data.query?.pages;
+                        const pageId = pages ? Object.keys(pages)[0] : null;
+                        const page = pageId ? pages[pageId] : null;
+
+                        if (page && !page.missing && page.thumbnail?.source) {
                             imageUrl = page.thumbnail.source;
-                            console.log(`Found single image on Wikipedia for ${animalName} (page thumbnail): ${imageUrl}`);
-                        } else {
-                            console.log(`Wikipedia page for "${animalName}" not found or no thumbnail.`);
+                            console.log(`Found single image on Wikipedia for ${animalName} (via "${decodeURIComponent(queryTitle)}" thumbnail): ${imageUrl}`);
+                            break; // Found an image, stop trying other terms
                         }
+                    } catch (error) {
+                        console.error(`Error fetching single image from Wikipedia for "${decodeURIComponent(queryTitle)}":`, error);
                     }
-                } catch (error) {
-                    console.error('Error fetching single image from Wikipedia:', error);
                 }
 
                 // Fallback to Wikimedia Commons search if no thumbnail found from Wikipedia page
                 if (!imageUrl) {
                     console.log('Wikipedia page thumbnail not found, trying Wikimedia Commons for single image...');
-                    // Increased srlimit to get more candidates for strict filtering
-                    const searchUrl = `${commonsApiUrl}&list=search&srsearch=${queryTitle}&srnamespace=6&srlimit=20&srwhat=text&srprop=snippet`; 
+                    // Use the original animalName for the Commons search, which has its own filtering
+                    const searchUrl = `${commonsApiUrl}&list=search&srsearch=${encodeURIComponent(animalName)}&srnamespace=6&srlimit=20&srwhat=text&srprop=snippet`; 
                     try {
                         const searchResponse = await fetch(searchUrl);
                         if (!searchResponse.ok) { console.warn(`Wikimedia Commons search failed for single image: ${searchResponse.status}`); return null; }
@@ -269,7 +316,6 @@
                                 const snippet = result.snippet ? result.snippet.toLowerCase() : '';
                                 const isImage = /\.(jpg|jpeg|png|gif|svg|webp)$/i.test(result.title);
                                 
-                                // Ensure all keywords from the animal name are present in the title or snippet
                                 const containsAllKeywords = keywords.every(keyword => 
                                     title.includes(keyword) || snippet.includes(keyword)
                                 );
@@ -277,7 +323,6 @@
                             });
 
                             if (filteredResults.length > 0) {
-                                // Get the URL of the first (most relevant) filtered result
                                 const bestMatchTitle = encodeURIComponent(filteredResults[0].title);
                                 const infoUrl = `${commonsApiUrl}&prop=imageinfo&iiprop=url&titles=${bestMatchTitle}&redirects=1`;
                                 const infoResponse = await fetch(infoUrl);
@@ -301,58 +346,74 @@
 
             } else {
                 // For multiple gallery images, search Wikimedia Commons directly for relevant files
-                const searchUrl = `${commonsApiUrl}&list=search&srsearch=${queryTitle}&srnamespace=6&srlimit=${count * 3}&srwhat=text&srprop=snippet`; // Get more results to filter down, and get snippets
-                
-                try {
-                    const searchResponse = await fetch(searchUrl);
-                    if (!searchResponse.ok) { console.warn(`Wikimedia Commons search failed: ${searchResponse.status}`); return []; }
-                    const searchData = await searchResponse.json();
-                    const searchResults = searchData.query?.search;
+                let allFilteredResults = [];
+                const processedTitles = new Set(); // To avoid duplicate image fetching
 
-                    if (searchResults && searchResults.length > 0) {
-                        const lowerCaseAnimalName = animalName.toLowerCase();
-                        // Split animal name into keywords for stricter matching
-                        const keywords = lowerCaseAnimalName.split(' ').filter(k => k.length > 0);
+                for (const query of searchTerms) { // Use generated search terms for Commons search as well
+                    const searchUrl = `${commonsApiUrl}&list=search&srsearch=${query}&srnamespace=6&srlimit=${count * 3}&srwhat=text&srprop=snippet`; 
+                    try {
+                        const searchResponse = await fetch(searchUrl);
+                        if (!searchResponse.ok) { console.warn(`Wikimedia Commons search failed for query "${decodeURIComponent(query)}": ${searchResponse.status}`); continue; }
+                        const searchData = await searchResponse.json();
+                        const searchResults = searchData.query?.search;
 
-                        // Filter for common image extensions AND strict keyword presence in title or snippet
-                        const filteredResults = searchResults.filter(result => {
-                            const title = result.title.toLowerCase();
-                            const snippet = result.snippet ? result.snippet.toLowerCase() : '';
-                            const isImage = /\.(jpg|jpeg|png|gif|svg|webp)$/i.test(result.title);
+                        if (searchResults && searchResults.length > 0) {
+                            const lowerCaseAnimalName = animalName.toLowerCase();
+                            const keywords = lowerCaseAnimalName.split(' ').filter(k => k.length > 0);
+
+                            const filteredResults = searchResults.filter(result => {
+                                const title = result.title.toLowerCase();
+                                const snippet = result.snippet ? result.snippet.toLowerCase() : '';
+                                const isImage = /\.(jpg|jpeg|png|gif|svg|webp)$/i.test(result.title);
+                                
+                                const containsAllKeywords = keywords.every(keyword => 
+                                    title.includes(keyword) || snippet.includes(keyword)
+                                );
+                                
+                                const isRelevant = (keywords.length > 1 && containsAllKeywords) || 
+                                                   (keywords.length === 1 && (title.includes(keywords[0]) || snippet.includes(keywords[0])));
+
+                                return isImage && isRelevant && !processedTitles.has(result.title);
+                            });
                             
-                            // Ensure all keywords from the animal name are present in the title or snippet
-                            const containsAllKeywords = keywords.every(keyword => 
-                                title.includes(keyword) || snippet.includes(keyword)
-                            );
+                            filteredResults.forEach(res => {
+                                if (!processedTitles.has(res.title)) {
+                                    allFilteredResults.push(res);
+                                    processedTitles.add(res.title);
+                                }
+                            });
 
-                            return isImage && containsAllKeywords;
-                        });
+                            if (allFilteredResults.length >= count) break; // Stop if we have enough
+                        }
+                    } catch (error) {
+                        console.error(`Error fetching gallery images from Wikimedia Commons for query "${decodeURIComponent(query)}":`, error);
+                    }
+                }
 
-                        const imageTitlesToFetch = filteredResults
-                            .slice(0, count) // Take only the desired 'count' after strict filtering
-                            .map(result => encodeURIComponent(result.title))
-                            .join('|');
+                const imageTitlesToFetch = allFilteredResults
+                    .slice(0, count) // Take only the desired 'count' after strict filtering
+                    .map(result => encodeURIComponent(result.title))
+                    .join('|');
 
-                        if (imageTitlesToFetch) {
-                            // Batch query for imageinfo to get URLs for all filtered image titles
-                            const infoUrl = `${commonsApiUrl}&prop=imageinfo&iiprop=url&titles=${imageTitlesToFetch}&redirects=1`;
-                            const infoResponse = await fetch(infoUrl);
-                            if (!infoResponse.ok) { console.warn(`Wikimedia Commons imageinfo failed: ${infoResponse.status}`); return []; }
-                            const infoData = await infoResponse.json();
-                            const infoPages = infoData.query?.pages;
+                if (imageTitlesToFetch) {
+                    const infoUrl = `${commonsApiUrl}&prop=imageinfo&iiprop=url&titles=${imageTitlesToFetch}&redirects=1`;
+                    try {
+                        const infoResponse = await fetch(infoUrl);
+                        if (!infoResponse.ok) { console.warn(`Wikimedia Commons imageinfo failed: ${infoResponse.status}`); return []; }
+                        const infoData = await infoResponse.json();
+                        const infoPages = infoData.query?.pages;
 
-                            if (infoPages) {
-                                for (const infoPageId in infoPages) {
-                                    const infoPage = infoPages[infoPageId];
-                                    if (infoPage.imageinfo && infoPage.imageinfo[0]?.url) {
-                                        imageUrls.push(infoPage.imageinfo[0].url);
-                                    }
+                        if (infoPages) {
+                            for (const infoPageId in infoPages) {
+                                const infoPage = infoPages[infoPageId];
+                                if (infoPage.imageinfo && infoPage.imageinfo[0]?.url) {
+                                    imageUrls.push(infoPage.imageinfo[0].url);
                                 }
                             }
                         }
+                    } catch (error) {
+                        console.error('Error fetching gallery image URLs from Wikimedia Commons:', error);
                     }
-                } catch (error) {
-                    console.error('Error fetching gallery images from Wikimedia Commons:', error);
                 }
                 console.log(`Found ${imageUrls.length} gallery images from Wikimedia Commons for ${animalName}.`);
                 return imageUrls;
@@ -398,13 +459,26 @@
                     const enrichedData = await Promise.all(data.map(async (animal) => {
                         const wikipediaDetails = await fetchWikipediaAnimalDetails(animal.name);
                         if (wikipediaDetails) {
+                            // Merge characteristics, prioritizing API-Ninjas if available and not 'Not specified'
+                            const mergedCharacteristics = {};
+                            
+                            // Start with Wikipedia's parsed characteristics
+                            for (const key in wikipediaDetails.characteristics) {
+                                mergedCharacteristics[key] = wikipediaDetails.characteristics[key];
+                            }
+
+                            // Overlay with API-Ninjas characteristics, prioritizing non-'Not specified' values
+                            for (const key in animal.characteristics) {
+                                if (animal.characteristics[key] && animal.characteristics[key].toString().trim() !== '' && animal.characteristics[key].toString().toLowerCase() !== 'not specified') {
+                                    mergedCharacteristics[key] = animal.characteristics[key];
+                                }
+                            }
+
                             return {
                                 ...animal,
-                                characteristics: {
-                                    ...wikipediaDetails.characteristics, // Wikipedia parsed characteristics
-                                    ...animal.characteristics, // API-Ninjas characteristics (override if present)
-                                },
-                                locations: (animal.locations && animal.locations.length > 0 && animal.locations[0] !== 'Not specified') ? animal.locations : wikipediaDetails.locations,
+                                characteristics: mergedCharacteristics,
+                                // Locations: if API-Ninjas has specific locations, use them, otherwise use Wikipedia's
+                                locations: (animal.locations && animal.locations.length > 0 && animal.locations[0].toString().toLowerCase() !== 'not specified') ? animal.locations : wikipediaDetails.locations,
                                 wikipedia_url: wikipediaDetails.wikipedia_url // Add Wikipedia URL
                             };
                         }
@@ -423,103 +497,138 @@
 
         /** Fetches basic animal details from Wikipedia (summary, scientific name, and attempts to parse characteristics). */
         async function fetchWikipediaAnimalDetails(animalName) {
-            const queryTitle = encodeURIComponent(animalName);
-            const url = `${wikipediaApiUrl}&prop=extracts|pageprops|info&exintro=1&explaintext=1&redirects=1&titles=${queryTitle}&inprop=url`; // Add inprop=url to get fullurl
-            try {
-                const response = await fetch(url);
-                if (!response.ok) {
-                    console.warn(`Wikipedia API (animal details) failed: ${response.status}`);
-                    return null;
-                }
-                const data = await response.json();
-                const pages = data.query?.pages;
+            const searchTerms = getWikipediaSearchTerms(animalName); // Use the new helper function
+            
+            for (const queryTitle of searchTerms) {
+                const url = `${wikipediaApiUrl}&prop=extracts|pageprops|info&exintro=1&explaintext=1&redirects=1&titles=${queryTitle}&inprop=url`;
+                try {
+                    const response = await fetch(url);
+                    if (!response.ok) {
+                        console.warn(`Wikipedia API (animal details) failed for "${decodeURIComponent(queryTitle)}": ${response.status}`);
+                        continue; // Try next title
+                    }
+                    const data = await response.json();
+                    const pages = data.query?.pages;
 
-                if (pages) {
-                    const pageId = Object.keys(pages)[0];
-                    const page = pages[pageId];
+                    if (pages) {
+                        const pageId = Object.keys(pages)[0];
+                        const page = pages[pageId];
 
-                    if (!page.missing) {
-                        const description = page.extract || 'No detailed description available from Wikipedia.';
-                        const wikipediaUrl = page.fullurl || `https://en.wikipedia.org/wiki/${queryTitle}`; // Get the full URL
-                        let scientificName = 'N/A';
-                        let diet = 'Not specified';
-                        let lifespan = 'Not specified';
-                        let habitat = 'Not specified';
-                        let locations = ['Not specified'];
+                        if (!page.missing) {
+                            const description = page.extract || 'No detailed description available from Wikipedia.';
+                            const wikipediaUrl = page.fullurl || `https://en.wikipedia.org/wiki/${queryTitle}`;
+                            let scientificName = 'N/A';
+                            let diet = 'Not specified';
+                            let lifespan = 'Not specified';
+                            let habitat = 'Not specified';
+                            let locations = ['Not specified'];
 
-                        // Attempt to extract scientific name from the first sentence of the extract
-                        const scientificNameMatch = description.match(/\b([A-Z][a-z]+)\s([a-z]+)\b/);
-                        if (scientificNameMatch && scientificNameMatch[0]) {
-                            scientificName = scientificNameMatch[0];
-                        }
+                            // --- NEW: Animal type validation ---
+                            const lowerCaseDescription = description.toLowerCase();
+                            const firstSentence = lowerCaseDescription.split('.')[0];
 
-                        // --- Heuristic parsing for characteristics from the description ---
-                        const lowerCaseDescription = description.toLowerCase();
+                            const animalIndicators = [
+                                'species of', 'genus of', 'family of', 'order of', 'class of', 'phylum of', 'kingdom animalia',
+                                'animal is', 'mammal is', 'bird is', 'fish is', 'reptile is', 'amphibian is', 'insect is',
+                                'vertebrate', 'invertebrate', 'wildlife', 'fauna', 'creature'
+                            ];
+                            
+                            // Check for strong biological indicators in the first sentence or overall description
+                            const isLikelyAnimalByContent = animalIndicators.some(indicator => firstSentence.includes(indicator)) ||
+                                                            animalIndicators.some(indicator => lowerCaseDescription.includes(indicator));
 
-                        // Diet
-                        let dietMatch = lowerCaseDescription.match(/(diet|eats|feeds on|prey on)( is)?\s*(.*?)(?:\.|\n|;|,|$)/i);
-                        if (dietMatch && dietMatch[3]) {
-                            diet = dietMatch[3].trim();
-                            diet = diet.replace(/^(a |an |the )/, '').replace(/^(typically |primarily |mainly )/, '');
-                            if (diet.length > 50) diet = diet.substring(0, 50) + '...'; 
-                        }
+                            // Also check if the original animal name (or parts of it) are present in the description
+                            const originalNameKeywords = animalName.toLowerCase().split(' ').filter(k => k.length > 0);
+                            const originalNameInDescription = originalNameKeywords.every(keyword => lowerCaseDescription.includes(keyword));
 
-                        // Lifespan
-                        let lifespanMatch = lowerCaseDescription.match(/(lifespan|life span|lives for|longevity)( is)?\s*(.*?)(?:years|year|months|month|days|day)/i);
-                        if (lifespanMatch && lifespanMatch[3]) {
-                            lifespan = lifespanMatch[3].trim() + (lifespanMatch[4] || '');
-                            if (lifespan.length > 30) lifespan = lifespan.substring(0, 30) + '...'; 
-                        } else {
-                            lifespanMatch = lowerCaseDescription.match(/live up to (\d+ (?:years|year))/i);
-                            if (lifespanMatch && lifespanMatch[1]) {
-                                lifespan = lifespanMatch[1];
+                            // If it doesn't seem like an animal, return null
+                            if (!isLikelyAnimalByContent && !originalNameInDescription) {
+                                console.log(`Wikipedia page for "${animalName}" (via "${decodeURIComponent(queryTitle)}") does not appear to be about an animal based on content. Skipping.`);
+                                continue; // Skip this page and try the next search term
                             }
-                        }
+                            // --- END NEW: Animal type validation ---
 
-                        // Habitat
-                        let habitatMatch = lowerCaseDescription.match(/(habitat|found in|lives in|inhabits)( is)?\s*(.*?)(?:\.|\n|;|,|$)/i);
-                        if (habitatMatch && habitatMatch[3]) {
-                            habitat = habitatMatch[3].trim();
-                             if (habitat.length > 70) habitat = habitat.substring(0, 70) + '...'; 
-                        } else {
-                            habitatMatch = lowerCaseDescription.match(/inhabits (.*?)(?:\.|\n|;|,|$)/i);
+
+                            // Attempt to extract scientific name from the first sentence of the extract
+                            const scientificNameMatch = description.match(/\b([A-Z][a-z]+)\s([a-z]+)\b/);
+                            if (scientificNameMatch && scientificNameMatch[0]) {
+                                scientificName = scientificNameMatch[0];
+                            }
+
+                            // --- Heuristic parsing for characteristics from the description ---
+                            // Diet: Look for patterns related to diet
+                            let dietMatch = lowerCaseDescription.match(/(?:diet is|eats|feeds on|primarily eats|omnivorous|carnivorous|herbivorous|insectivorous|piscivorous)(?: an?| the)?\s*([\w\s,.\-()]+?)(?:\.|\n|;|,|$)/i);
+                            if (dietMatch && dietMatch[1]) {
+                                diet = dietMatch[1].trim();
+                                diet = diet.replace(/^(a |an |the |typically |primarily |mainly |various |a variety of )/g, '').trim();
+                                if (diet.length > 50) diet = diet.substring(0, 50) + '...'; 
+                            } else {
+                                dietMatch = lowerCaseDescription.match(/(carnivore|herbivore|omnivore|insectivore|piscivore)s?/i); // Broader match for diet type
+                                if (dietMatch) diet = dietMatch[0];
+                            }
+
+
+                            // Lifespan: Look for patterns related to lifespan
+                            let lifespanMatch = lowerCaseDescription.match(/(?:lifespan is|life span is|lives for|can live for|live up to|longevity of)\s*([\d\s\w]+?\s*(?:years|year|months|month|days|day) of age)?/i);
+                            if (lifespanMatch && lifespanMatch[1]) {
+                                lifespan = lifespanMatch[1].trim();
+                                if (lifespan.length > 30) lifespan = lifespan.substring(0, 30) + '...'; 
+                            } else {
+                                lifespanMatch = lowerCaseDescription.match(/live up to (\d+\s*(?:to\s*\d+\s*)?(?:years|year))/i);
+                                if (lifespanMatch && lifespanMatch[1]) {
+                                    lifespan = lifespanMatch[1];
+                                } else {
+                                    lifespanMatch = lowerCaseDescription.match(/(\d+\s*(?:to\s*\d+\s*)?(?:years|year|months|month|days|day) old)/i); // e.g., "10 years old"
+                                    if (lifespanMatch && lifespanMatch[1]) lifespan = lifespanMatch[1];
+                                }
+                            }
+
+
+                            // Habitat: Look for patterns related to habitat
+                            let habitatMatch = lowerCaseDescription.match(/(?:habitat is|found in|lives in|inhabits|native to|occurs in)(?: the)?\s*([\w\s,.\-()]+?)(?:\.|\n|;|,|$)/i);
                             if (habitatMatch && habitatMatch[1]) {
                                 habitat = habitatMatch[1].trim();
-                                if (habitat.length > 70) habitat = habitat.substring(0, 70) + '...'; 
+                                 if (habitat.length > 70) habitat = habitat.substring(0, 70) + '...'; 
+                            } else {
+                                habitatMatch = lowerCaseDescription.match(/inhabits (.*?)(?:\.|\n|;|,|$)/i);
+                                if (habitatMatch && habitatMatch[1]) {
+                                    habitat = habitatMatch[1].trim();
+                                    if (habitat.length > 70) habitat = habitat.substring(0, 70) + '...'; 
+                                }
                             }
-                        }
 
-                        // Locations (simple parsing, often complex in text)
-                        let locationMatch = lowerCaseDescription.match(/(native to|found across|distributed throughout|inhabits|occurs in|range includes)(.*?)(?:\.|\n|;|,|$)/i);
-                        if (locationMatch && locationMatch[2]) {
-                            let extractedLocations = locationMatch[2].trim().split(/,\s*|\s*and\s*/).map(loc => loc.trim()).filter(loc => loc.length > 0);
-                            if (extractedLocations.length > 0) {
-                                locations = extractedLocations.slice(0, 3);
-                                if (extractedLocations.length > 3) locations.push('...');
+                            // Locations (simple parsing, often complex in text)
+                            let locationMatch = lowerCaseDescription.match(/(native to|found across|distributed throughout|occurs in|range includes)(.*?)(?:\.|\n|;|,|$)/i);
+                            if (locationMatch && locationMatch[2]) {
+                                let extractedLocations = locationMatch[2].trim().split(/,\s*|\s*and\s*|(?=\s*in\s*(?:the\s*)?[A-Z])/).map(loc => loc.trim()).filter(loc => loc.length > 0); // More robust split
+                                if (extractedLocations.length > 0) {
+                                    locations = extractedLocations.slice(0, 3);
+                                    if (extractedLocations.length > 3) locations.push('...');
+                                }
                             }
-                        }
 
-                        // Construct a basic animal object similar to API-Ninjas structure
-                        return {
-                            name: animalName,
-                            taxonomy: {
-                                scientific_name: scientificName,
-                            },
-                            characteristics: {
-                                description: description,
-                                diet: diet,
-                                lifespan: lifespan,
-                                habitat: habitat
-                            },
-                            locations: locations,
-                            wikipedia_url: wikipediaUrl // Add the Wikipedia URL here
-                        };
+                            // Construct a basic animal object similar to API-Ninjas structure
+                            return {
+                                name: animalName,
+                                taxonomy: {
+                                    scientific_name: scientificName,
+                                },
+                                characteristics: {
+                                    description: description,
+                                    diet: diet,
+                                    lifespan: lifespan,
+                                    habitat: habitat
+                                },
+                                locations: locations,
+                                wikipedia_url: wikipediaUrl // Add the Wikipedia URL here
+                            };
+                        }
                     }
+                } catch (error) {
+                    console.error(`Error fetching animal details from Wikipedia for "${decodeURIComponent(queryTitle)}":`, error);
                 }
-            } catch (error) {
-                console.error('Error fetching animal details from Wikipedia:', error);
             }
-            return null;
+            return null; // Return null if no suitable Wikipedia page is found after all attempts
         }
 
 
@@ -540,7 +649,7 @@
                 const diet = animal.characteristics?.diet || 'Not specified';
                 const lifespan = animal.characteristics?.lifespan || 'Not specified';
                 const habitat = animal.characteristics?.habitat || 'Not specified';
-                const locations = (animal.locations && animal.locations.length > 0 && animal.locations[0] !== 'Not specified') ? animal.locations.join(', ') : 'Not specified';
+                const locations = (animal.locations && animal.locations.length > 0 && animal.locations[0].toString().toLowerCase() !== 'not specified') ? animal.locations.join(', ') : 'Not specified';
                 const wikipediaUrl = animal.wikipedia_url || `https://en.wikipedia.org/wiki/${encodeURIComponent(name)}`;
 
 
@@ -627,7 +736,7 @@
                 const characteristicsToDisplay = ['diet', 'lifespan', 'habitat', 'skin_type', 'top_speed', 'weight', 'height'];
                 characteristicsToDisplay.forEach(key => {
                     const value = animal.characteristics[key];
-                    if (value && value.trim() !== '' && value !== 'Not specified' && key !== 'description') {
+                    if (value && value.toString().trim() !== '' && value.toString().toLowerCase() !== 'not specified' && key !== 'description') {
                         const label = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
                         const iconInfo = iconMap[key] || iconMap['default'];
                         characteristicsHtml += `<p><i class="fas ${iconInfo.icon} w-6 ${iconInfo.color}"></i> <strong class="font-semibold">${label}:</strong> ${value}</p>`;
